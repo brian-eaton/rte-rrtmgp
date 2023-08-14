@@ -25,12 +25,12 @@ program cam_test
   real(wp), dimension(:,:),   allocatable :: p_lay, t_lay, p_lev
 
   ! Shortwave only
-  real(wp), dimension(:),     allocatable :: mu0
+  real(wp), dimension(:),     allocatable :: mu0 ! cosine of solar zenith angle
   real(wp), dimension(:,:),   allocatable :: sfc_alb_dir, sfc_alb_dif ! First dimension is band
-  !
-  ! Source functions
-  !   Shortwave
-  real(wp), dimension(:,:), allocatable, save :: toa_flux
+  real(wp), dimension(:),     allocatable :: asdir, asdif
+
+  ! Shortwave TOA flux
+  real(wp), dimension(:,:), allocatable :: toa_flux
 
   ! Output variables
   real(wp), dimension(:,:), target, &
@@ -46,7 +46,7 @@ program cam_test
   logical :: top_at_1
 
   integer  :: ncol, nlay, nbnd, ngpt
-  integer  :: igas
+  integer  :: i, igas
   integer  :: nUserArgs = 0
 
   integer, parameter :: ngas = 6           ! no data for 'co ' and 'n2 '
@@ -68,14 +68,10 @@ program cam_test
   !   Arrays are allocated as they are read
   call read_atmos(input_file, ncol,     &
                   p_lay, t_lay, p_lev,  &
-                  gas_concs_in)
+                  gas_concs, mu0, &
+                  asdir, asdif)
 
   nlay = size(p_lay, 2)
-
-  call stop_on_err(gas_concs%init(gas_names))
-  do igas = 1, ngas
-    call vmr_2d_to_1d(gas_concs, gas_concs_in, gas_names(igas), size(p_lay, 1), nlay)
-  end do
 
   ! load data into classes
   call load_and_init(k_dist, k_dist_file, gas_concs)
@@ -88,14 +84,18 @@ program cam_test
   ! Allocate arrays for the optical properties themselves.
   call stop_on_err(atmos%alloc_2str( ncol, nlay, k_dist))
 
-  !  Boundary conditions depending on whether the k-distribution being supplied
+  ! Boundary conditions
   allocate(toa_flux(ncol, ngpt))
-  allocate(sfc_alb_dir(nbnd, ncol), sfc_alb_dif(nbnd, ncol), mu0(ncol))
+  allocate(sfc_alb_dir(nbnd, ncol), sfc_alb_dif(nbnd, ncol))
 
-  ! Ocean-ish values for no particular reason
-  sfc_alb_dir = 0.06_wp
-  sfc_alb_dif = 0.06_wp
-  mu0 = .86_wp
+  ! CAM's albedos are not spectrally resolved
+  do i = 1, ncol
+     sfc_alb_dir(:,i) = asdir(i)
+     sfc_alb_dif(:,i) = asdif(i)
+  end do
+!  sfc_alb_dir = 0.06_wp
+!  sfc_alb_dif = 0.06_wp
+  mu0 = 0.86_wp
 
   ! Fluxes
   allocate(flux_up(ncol,nlay+1), flux_dn(ncol,nlay+1))
@@ -159,45 +159,77 @@ end subroutine vmr_2d_to_1d
 
 !=========================================================================================
 
-subroutine read_atmos(fileName, ncol, p_lay, t_lay, p_lev, gas_concs)
+subroutine read_atmos(fileName, ncol, p_lay, t_lay, p_lev, &
+                      gas_concs, mu0, asdir, asdif)
 
    character(len=*),    intent(in   ) :: fileName
    integer,             intent(out  ) :: ncol
    real(wp), dimension(:,:), allocatable, &
-                        intent(inout) :: p_lay, t_lay, p_lev
-   type(ty_gas_concs), intent(inout) :: gas_concs
+                        intent(out) :: p_lay, t_lay, p_lev
+   type(ty_gas_concs),  intent(out) :: gas_concs
+   real(wp), dimension(:), allocatable, intent(out) :: mu0, asdir, asdif
    ! -------------------
    integer :: igas
-   integer :: ncid, nlay, nlev, nlat, nlon
+   integer :: ncid, nlay, nlev, pver, pverp
    real(wp), dimension(:,:,:,:), allocatable :: lay4d, lev4d
+   real(wp), dimension(:,:,:), allocatable :: tmp3d
    real(wp), dimension(:,:), allocatable :: conc
+   real(wp), dimension(:), allocatable :: a, b, alpha, beta
    ! ---------------------------------------------------------------------------
 
    if(nf90_open(trim(fileName), NF90_NOWRITE, ncid) /= NF90_NOERR) &
       call stop_on_err("read_atmos: can't find file " // trim(fileName))
 
-   ! CAM dataset has a single column extracted from a 4D array (lon,lat,lev,time).
-   ! Profile variables have shape (1,1,:,1).
-   ncol = 1
-   nlay = get_dim_size(ncid, 'lev')
-   nlev = get_dim_size(ncid, 'ilev')
-   if(nlev /= nlay+1) call stop_on_err("read_atmos: nlev should be nlay+1")
+   ! CAM dataset has a hyperslab of columns extracted from a 4D array (lon,lat,lev,time).
+   ! Profile variables have shape (:,1,:,1).
+   ! Allocate the state variables to include the "extra layer" that CAM uses for RRTMGP.
+   ! This assumes that CAM's top is below 1 Pa.  Set extra layer values the same way
+   ! that CAM does.
+   ncol = get_dim_size(ncid, 'lon')
+   pver = get_dim_size(ncid, 'lev')
+   pverp = get_dim_size(ncid, 'ilev')
+   nlay = pver + 1
+   nlev = nlay + 1
+   allocate(mu0(ncol), asdir(ncol), asdif(ncol))
+   allocate(p_lev(ncol,nlev), p_lay(ncol,nlay), t_lay(ncol,nlay), conc(ncol,nlay))
+   allocate(a(ncol), b(ncol), alpha(ncol), beta(ncol))
 
-   lay4d = read_field(ncid, 'rad_pmid', 1, 1, nlay, 1)
-   p_lay = reshape(lay4d, [1, nlay])
+   tmp3d = read_field(ncid, 'rad_coszen', ncol, 1, 1)
+   mu0 = tmp3d(:,1,1)
 
-   lay4d = read_field(ncid, 'rad_temp', 1, 1, nlay, 1)
-   t_lay = reshape(lay4d, [1, nlay])
+   tmp3d = read_field(ncid, 'rad_asdir', ncol, 1, 1)
+   asdir = tmp3d(:,1,1)
 
-   lev4d = read_field(ncid, 'rad_pint', 1, 1, nlev, 1)
-   p_lev = reshape(lev4d, [1, nlev])
+   tmp3d = read_field(ncid, 'rad_asdif', ncol, 1, 1)
+   asdif = tmp3d(:,1,1)
+
+   lev4d = read_field(ncid, 'rad_pint', ncol, 1, pverp, 1)
+   p_lev(:,2:nlev) = lev4d(:,1,:,1)
+   ! top interface of extra layer set to 1.01 Pa
+   p_lev(:,1) = 1.01_wp
+
+   lay4d = read_field(ncid, 'rad_pmid', ncol, 1, pver, 1)
+   p_lay(:,2:nlay) = lay4d(:,1,:,1)
+   ! set top midpoint pressure the same way CAM does
+   p_lay(:,1) = 0.5_wp * p_lev(:,2)
+
+   lay4d = read_field(ncid, 'rad_temp', ncol, 1, pver, 1)
+   t_lay(:,2:nlay) = lay4d(:,1,:,1)
+   t_lay(:,1) = t_lay(:,2)
+
+   ! factors used to compute the extra layer concentration of O3
+   alpha = log(p_lev(:,2)/50._wp)
+   beta = log(p_lay(:,2)/p_lev(:,2))/log(p_lay(:,2)/50._wp)
+   a = ( (1._wp + alpha)*exp(-alpha) - 1._wp ) / alpha
+   b = 1._wp - exp(-alpha)
 
    call stop_on_err(gas_concs%init(gas_names))
    do igas = 1, ngas
       if(.not. var_exists(ncid, trim(cam_names(igas)))) &
          call stop_on_err("read_atmos: can't read concentration of " // trim(gas_names(igas)))
-      lay4d = read_field(ncid, trim(cam_names(igas)), 1, 1, nlay, 1)
-      conc = reshape(lay4d, [1, nlay])
+      lay4d = read_field(ncid, trim(cam_names(igas)), ncol, 1, pver, 1)
+      conc(:,2:nlay) = lay4d(:,1,:,1)
+      conc(:,1) = conc(:,2)
 
       ! convert conc to vmr
       select case (trim(cam_names(igas)))
@@ -210,6 +242,9 @@ subroutine read_atmos(fileName, ncol, p_lay, t_lay, p_lev, gas_concs)
             conc = conc * 0.658114_wp
          case ('rad_ozone')
             conc = conc * 0.603428_wp
+            ! adjust "extra layer" value of ozone
+            conc(:,1) = (conc(:,1) / (1._wp + beta)) * (a+b)
+            print*,'ozone=',conc(1,:)
          case ('rad_N2O')
             conc = conc * 0.658090_wp
          case ('rad_CH4')
@@ -231,26 +266,26 @@ subroutine write_sw_fluxes(fileName, flux_up, flux_dn, flux_dir)
    character(len=*),         intent(in) :: fileName
    real(wp), dimension(:,:), intent(in) :: flux_up, flux_dn, flux_dir
    ! -------------------
-   integer :: ncid, ncol, nlev, ilev
+   integer :: ncid, ncol, nlev, nlon, ilev
    ! -------------------
    if(nf90_open(trim(fileName), NF90_WRITE, ncid) /= NF90_NOERR) &
       call stop_on_err("write_fluxes: can't open file " // trim(fileName))
-   !
-   ! At present these dimension sizes aren't used
-   !   We could certainly check the array sizes against these dimension sizes
-   !
+
    ncol  = size(flux_up, dim=1)
    nlev  = size(flux_up, dim=2)
-   ! number of layer interfaces in CAM dataset
-   ilev  = get_dim_size(ncid, 'ilev')
-   if (nlev /= ilev) then
-      print*, 'ERROR: nlev, ilev= ', nlev, ilev
-   end if
-   call create_dim(ncid, "col_flx", ncol)
 
-   call create_var(ncid, "sw_flux_up",  ["col_flx",  "ilev   "], [ncol, nlev])
-   call create_var(ncid, "sw_flux_dn",  ["col_flx",  "ilev   "], [ncol, nlev])
-   call create_var(ncid, "sw_flux_dir", ["col_flx",  "ilev   "], [ncol, nlev])
+   ! add dimension for number of layer interfaces in RRTMGP grid
+   call create_dim(ncid, 'plev_rad', nlev)
+
+   ! check number of columns in CAM dataset
+   nlon  = get_dim_size(ncid, 'lon')
+   if (nlon /= ncol) then
+      print*, 'ERROR: ncol, nlon= ', ncol, nlon
+   end if
+
+   call create_var(ncid, "sw_flux_up",  ["lon     ",  "plev_rad"], [ncol, nlev])
+   call create_var(ncid, "sw_flux_dn",  ["lon     ",  "plev_rad"], [ncol, nlev])
+   call create_var(ncid, "sw_flux_dir", ["lon     ",  "plev_rad"], [ncol, nlev])
 
    call stop_on_err(write_field(ncid, "sw_flux_up",  flux_up ))
    call stop_on_err(write_field(ncid, "sw_flux_dn",  flux_dn ))
