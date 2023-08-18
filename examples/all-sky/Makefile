@@ -40,6 +40,9 @@ rrtmgp_allsky: $(ADDITIONS) rrtmgp_allsky.o
 
 rrtmgp_allsky.o: $(ADDITIONS) rrtmgp_allsky.F90
 
+cam_test: $(ADDITIONS) cam_test.o
+cam_test.o: cam_test.F90
+
 mo_cloud_optics.o: mo_cloud_optics.F90
 mo_load_coefficients.o: mo_simple_netcdf.o mo_load_coefficients.F90
 mo_garand_atmos_io.o:   mo_simple_netcdf.o mo_garand_atmos_io.F90

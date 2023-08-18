@@ -10,6 +10,9 @@ libs:
 	make -C examples/all-sky -j
 	make -C examples/rfmip-clear-sky -j
 
+cam_test:
+	make -C examples/all-sky cam_test
+
 tests:
 	make -C examples/rfmip-clear-sky tests
 	make -C examples/all-sky         tests
