@@ -13,6 +13,9 @@ libs:
 cam_test:
 	make -C examples/all-sky cam_test
 
+cam_test_mpi:
+	make -C examples/all-sky cam_test_mpi
+
 tests:
 	make -C examples/rfmip-clear-sky tests
 	make -C examples/all-sky         tests

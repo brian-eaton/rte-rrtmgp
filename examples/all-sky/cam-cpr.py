@@ -2,20 +2,25 @@
 
 # This script compares SW fluxes for 2 cam_test runs.
 
+import sys
+
 import numpy as np
 import xarray as xr
 
-case1='cam-profile.nc'
-case2='cam-test.nc'
-#case2='/work/test-src/rp-cam-test/examples/all-sky/cam-profile.nc'
+if (len(sys.argv) != 3):
+    sys.stderr.write('Usage: cam-cpr.py file1 file2\n')
+    sys.exit(1)
+
+case1 = sys.argv[1]
+case2 = sys.argv[2]
 
 f1 = xr.open_dataset(case1)
 f2 = xr.open_dataset(case2)
 
 for v in ['sw_flux_up', 'sw_flux_dn', 'sw_flux_dir']:
 
-    v1 = f1[v].data[:,0]
-    v2 = f2[v].data[:,0]
+    v1 = f1[v].data
+    v2 = f2[v].data
     abs_diff = abs(v1 - v2)
     avg = 0.5 * (v1 + v2)
     # Division raises a runtime warning when we divide by zero even if the
